@@ -1,0 +1,19 @@
+{
+  "name": "nsfw-silent-killer",
+  "version": "1.0.0",
+  "description": "Max level NSFW moderation bot",
+  "main": "api/bot.js",
+  "scripts": {
+    "start": "node api/bot.js"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs-node": "^4.10.0",
+    "axios": "^1.4.0",
+    "nsfwjs": "^2.4.2",
+    "telegraf": "^4.12.2"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}
+
