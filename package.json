@@ -1,7 +1,7 @@
 {
-  "name": "nsfw-silent-killer",
-  "version": "1.0.0",
-  "description": "Max level NSFW moderation bot",
+  "name": "aegis-moderation-node",
+  "version": "3.0.0",
+  "description": "Advanced Zero-Tolerance Media Moderation Engine",
   "main": "api/bot.js",
   "scripts": {
     "start": "node api/bot.js"
@@ -10,10 +10,10 @@
     "@tensorflow/tfjs-node": "^4.10.0",
     "axios": "^1.4.0",
     "nsfwjs": "^2.4.2",
+    "sharp": "^0.32.6",
     "telegraf": "^4.12.2"
   },
   "engines": {
     "node": "18.x"
   }
 }
-
