@@ -2,130 +2,154 @@ const { Telegraf } = require('telegraf');
 const axios = require('axios');
 const tf = require('@tensorflow/tfjs-node');
 const nsfwjs = require('nsfwjs');
+const sharp = require('sharp'); 
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// Variables for State and Spam Tracking (Active in memory during function execution)
-let botState = 'auto'; 
+// --- System States & Memory ---
+let systemMode = 'auto'; // Modes: on, off, auto
 const spamTracker = new Map(); 
 let nsfwModel = null;
 
-// AI Model Load karna (Optimized for Vercel)
-const loadModel = async () => {
+// --- Neural Network Initialization ---
+const loadNeuralModel = async () => {
     if (!nsfwModel) {
-        nsfwModel = await nsfwjs.load();
+        nsfwModel = await nsfwjs.load(); 
     }
 };
 
-// --- Admin Commands ---
-bot.command('nsfwon', (ctx) => {
-    botState = 'on';
-    ctx.reply('🛡️ NSFW Moderation: PERMANENT ON (Silent Killer Mode)');
-});
+// --- Control Directives ---
+bot.command('system_on', (ctx) => { systemMode = 'on'; ctx.reply('🛡️ Defense Matrix: ACTIVE'); });
+bot.command('system_off', (ctx) => { systemMode = 'off'; ctx.reply('🛡️ Defense Matrix: OFFLINE'); });
+bot.command('system_auto', (ctx) => { systemMode = 'auto'; ctx.reply('🛡️ Defense Matrix: AUTO-SCHEDULE (00:00 - 06:00 IST)'); });
 
-bot.command('nsfwoff', (ctx) => {
-    botState = 'off';
-    ctx.reply('🛡️ NSFW Moderation: PERMANENT OFF');
-});
-
-bot.command('nsfwauto', (ctx) => {
-    botState = 'auto';
-    ctx.reply('🛡️ NSFW Moderation: AUTO MODE (12 AM - 6 AM IST)');
-});
-
-// --- Core Logic ---
-bot.on(['photo', 'document'], async (ctx) => {
-    // 1. Intelligent Time Check (IST)
-    const nowIST = new Date().toLocaleString("en-US", {timeZone: "Asia/Kolkata"});
-    const hour = new Date(nowIST).getHours();
+// --- Unified Media Processor ---
+bot.on(['photo', 'document', 'sticker', 'video', 'animation'], async (ctx) => {
     
-    let isActive = false;
-    if (botState === 'on') isActive = true;
-    else if (botState === 'auto') isActive = (hour >= 0 && hour < 6);
-
-    if (!isActive) return;
+    // 1. Time Zone Validation (IST)
+    const nowIST = new Date().toLocaleString("en-US", {timeZone: "Asia/Kolkata"});
+    const currentHour = new Date(nowIST).getHours();
+    
+    const isOperational = (systemMode === 'on') || (systemMode === 'auto' && currentHour >= 0 && currentHour < 6);
+    if (!isOperational) return;
 
     try {
-        await loadModel();
+        await loadNeuralModel();
 
-        let fileId;
-        // Handle both compressed photos and uncompressed documents (images)
-        if (ctx.message.photo) {
-            fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-        } else if (ctx.message.document && ctx.message.document.mime_type.startsWith('image/')) {
-            fileId = ctx.message.document.file_id;
-        } else {
-            return; // Not an image
+        let targetFileId = null;
+        let needsFormatConversion = false;
+        const payload = ctx.message;
+        
+        // 2. Intelligent Media Extraction
+        if (payload.photo) {
+            targetFileId = payload.photo[payload.photo.length - 1].file_id; 
+        } 
+        else if (payload.document && payload.document.mime_type?.startsWith('image/')) {
+            targetFileId = payload.document.file_id; 
+        } 
+        else if (payload.sticker) {
+            needsFormatConversion = true; 
+            if (payload.sticker.is_animated || payload.sticker.is_video) {
+                if (payload.sticker.thumbnail) targetFileId = payload.sticker.thumbnail.file_id;
+            } else {
+                targetFileId = payload.sticker.file_id;
+            }
+        } 
+        else if (payload.video && payload.video.thumbnail) {
+            targetFileId = payload.video.thumbnail.file_id; 
+        } 
+        else if (payload.animation && payload.animation.thumbnail) {
+            targetFileId = payload.animation.thumbnail.file_id; 
         }
 
-        const fileUrl = await ctx.telegram.getFileLink(fileId);
-        const response = await axios.get(fileUrl.href, { responseType: 'arraybuffer' });
-        const imageBuffer = Buffer.from(response.data);
+        if (!targetFileId) return;
 
-        // Buffer to Tensor
-        const decodedImage = tf.node.decodeImage(imageBuffer, 3);
-        const predictions = await nsfwModel.classify(decodedImage);
-        decodedImage.dispose(); // Prevent Vercel Memory Leaks
+        // 3. Buffer Acquisition & Format Normalization
+        const fileLink = await ctx.telegram.getFileLink(targetFileId);
+        const networkResponse = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
+        let mediaBuffer = Buffer.from(networkResponse.data);
 
-        // 2. Max Level Accuracy Check
-        let isNsfw = false;
-        for (const prediction of predictions) {
-            // "Porn" aur "Hentai" class har type ke extreme aur illegal explicit content ko catch karti hai
-            if (['Porn', 'Hentai', 'Sexy'].includes(prediction.className) && prediction.probability > 0.65) {
-                isNsfw = true;
+        // Convert WebP/Unsupported formats to standard JPEG via Sharp
+        if (needsFormatConversion) {
+            mediaBuffer = await sharp(mediaBuffer).jpeg().toBuffer();
+        }
+
+        // 4. Tensor Processing & Classification
+        const imageTensor = tf.node.decodeImage(mediaBuffer, 3);
+        const inferenceResults = await nsfwModel.classify(imageTensor);
+        
+        // Crucial: Prevent memory leaks in serverless architecture
+        imageTensor.dispose(); 
+        
+        // 5. Zero-Tolerance Validation
+        let isViolation = false;
+        for (const attribute of inferenceResults) {
+            // Strict Threshold: 0.40 (40% confidence triggers execution)
+            if (['Porn', 'Hentai', 'Sexy'].includes(attribute.className) && attribute.probability > 0.40) {
+                isViolation = true;
                 break;
             }
         }
 
-        // 3. Delete & Anti-Spam Logic
-        if (isNsfw) {
-            // Silently delete the explicit image
-            await ctx.deleteMessage(ctx.message.message_id).catch(() => {});
+        // 6. Execution & Penalties
+        if (isViolation) {
+            // Immediate silent purge
+            await ctx.deleteMessage(payload.message_id).catch(() => {});
 
-            const userId = ctx.from.id;
-            const chatId = ctx.chat.id;
+            const violatorId = ctx.from.id;
+            const contextChatId = ctx.chat.id;
 
-            // Update user spam count
-            let userStats = spamTracker.get(userId) || { count: 0 };
-            userStats.count += 1;
-            spamTracker.set(userId, userStats);
+            // Increment strike counter
+            let violatorProfile = spamTracker.get(violatorId) || { strikes: 0 };
+            violatorProfile.strikes += 1;
+            spamTracker.set(violatorId, violatorProfile);
 
-            // Agar 5 images se zyada spam kiya
-            if (userStats.count >= 5) {
-                const muteMinutes = 10;
-                const untilDate = Math.floor(Date.now() / 1000) + (muteMinutes * 60);
+            // Penalty enforcement: 5 strikes = 10 Minute Mute
+            if (violatorProfile.strikes >= 5) {
+                const isolationDuration = 10; // Minutes
+                const releaseTimestamp = Math.floor(Date.now() / 1000) + (isolationDuration * 60);
 
-                // Mute the user silently (requires bot to be Admin with restrict permissions)
-                await ctx.telegram.restrictChatMember(chatId, userId, {
+                // Execute mute protocol
+                await ctx.telegram.restrictChatMember(contextChatId, violatorId, {
                     permissions: { can_send_messages: false },
-                    until_date: untilDate
-                }).catch((err) => console.log("Mute error (Bot admin nahi hai):", err));
+                    until_date: releaseTimestamp
+                }).catch(() => {}); 
 
-                // Optional: Mute notification (Delete if you want 100% silence)
-                const msg = await ctx.reply(`🚫 [Action taken] Ek user ko lagatar NSFW spam karne ke karan 10 minute ke liye mute kiya gaya hai.`);
-                setTimeout(() => ctx.deleteMessage(msg.message_id).catch(() => {}), 5000);
+                // Professional English Mute Notification
+                const enforcementLog = await ctx.reply(
+                    "⚠️ **Access Restricted**\n" +
+                    "A user has been temporarily silenced for 10 minutes due to consecutive zero-tolerance media violations. System integrity maintained.",
+                    { parse_mode: "Markdown" }
+                );
 
-                // Reset count after muting
-                spamTracker.delete(userId);
+                // Auto-delete the notification after 8 seconds to maintain chat aesthetic
+                setTimeout(() => ctx.deleteMessage(enforcementLog.message_id).catch(() => {}), 8000);
+
+                // Reset strikes post-penalty
+                spamTracker.delete(violatorId);
             }
         }
-    } catch (error) {
-        console.error("Vercel AI Processing Error:", error.message);
+    } catch (criticalError) {
+        console.error("System Exception:", criticalError.message);
     }
 });
 
-// --- Vercel Serverless Webhook ---
+// --- Serverless Entry Point ---
 module.exports = async (req, res) => {
     try {
         if (req.method === 'POST') {
-            await bot.handleUpdate(req.body, res);
+            // Implement timeout race-condition to satisfy Vercel limits
+            await Promise.race([
+                bot.handleUpdate(req.body, res),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Function Timeout Pre-empted')), 8500))
+            ]).catch(err => console.log('Controlled Exit:', err.message));
+            
             res.status(200).send('OK');
         } else {
-            res.status(200).send('Kanu Bhai Ka Bot Zinda Hai!');
+            res.status(200).send('Aegis Moderation Engine Operational.');
         }
-    } catch (error) {
-        console.error("Webhook Error:", error);
-        res.status(500).send('Server Error');
+    } catch (serverError) {
+        res.status(500).send('Internal Architecture Error');
     }
 };
-  
+        
